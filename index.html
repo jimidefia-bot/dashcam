@@ -15,10 +15,13 @@ button{border:0;border-radius:12px;padding:14px 16px;font-size:16px;background:#
 input,select{width:100%;padding:12px;border-radius:8px;border:1px solid #444;background:#222;color:#fff;font-size:16px}
 .clip{background:#222;border-radius:10px;padding:10px;margin:10px 0}.clip div{display:flex;gap:8px;margin-top:8px}
 #pl{width:100%;max-height:50vh;background:#000}small{color:#999}
+.sm{padding:8px 11px;font-size:15px}#pv{touch-action:manipulation}
+#dim{position:fixed;inset:0;background:#000;z-index:50;display:none;color:#4a0000;font-size:13px;align-items:center;justify-content:center;text-align:center;padding:20px;user-select:none;-webkit-user-select:none;touch-action:none}#dim.show{display:flex}
 </style></head><body>
 <video id="pv" autoplay muted playsinline></video>
-<div class="bar"><span id="st">Arrêté</span><span id="info"></span></div>
-<div class="bot"><button id="cfgb">⚙</button><button id="go">Démarrer</button><button id="save" disabled>SAUVER 2’ + 3’</button><button id="clb">Clips</button></div>
+<div class="bar"><div><span id="st">Arrêté</span><br><small id="info"></small></div><div style="display:flex;gap:6px;align-items:flex-start"><button class="sm" id="cfgb">⚙</button><button class="sm" id="dimb">🌙</button><button class="sm" id="clb">Clips</button></div></div>
+<div class="bot"><button id="go">Démarrer</button><button id="save" disabled>SAUVER 2’ + 3’</button></div>
+<div id="dim"><div id="dtx"></div></div>
 
 <div class="pan" id="cfg"><h2>Réglages</h2>
 <label>Taille du tampon (minutes de vidéo conservées)</label><input id="buf" type="number" min="3" max="240">
@@ -27,6 +30,10 @@ input,select{width:100%;padding:12px;border-radius:8px;border:1px solid #444;bac
 <label>Qualité</label><select id="q"><option value="720">720p – 4 Mb/s</option><option value="1080">1080p – 8 Mb/s</option></select>
 <label>Caméra</label><select id="cam"><option value="environment">Arrière</option><option value="user">Avant</option></select>
 <label>Micro</label><select id="mic"><option value="0">Non</option><option value="1">Oui</option></select>
+<label>Sauvegarde automatique en cas de choc</label><select id="shock"><option value="1">Oui</option><option value="0">Non</option></select>
+<label>Sensibilité au choc (en g ; plus petit = plus sensible)</label><input id="sens" type="number" min="0.5" max="10" step="0.5">
+<label>Incruster date, heure, vitesse et GPS dans la vidéo</label><select id="stamp"><option value="1">Oui</option><option value="0">Non</option></select>
+<label>Écran noir automatique 10 s après le démarrage</label><select id="autodim"><option value="0">Non</option><option value="1">Oui</option></select>
 <label>Télécharger automatiquement le ZIP après chaque sauvegarde</label><select id="autodl"><option value="0">Non</option><option value="1">Oui</option></select>
 <p id="est"></p><button id="ok">Enregistrer les réglages</button></div>
 
@@ -34,8 +41,8 @@ input,select{width:100%;padding:12px;border-radius:8px;border:1px solid #444;bac
 
 <script>
 const $=s=>document.querySelector(s), SEG=10000;
-const cfg=Object.assign({buf:10,pre:2,post:3,q:"720",cam:"environment",mic:"0",autodl:"0"},JSON.parse(localStorage.cfg||"{}"));
-let buf,clips,stream,cur,timer,segs=[],events=[],wl;
+const cfg=Object.assign({buf:10,pre:2,post:3,q:"720",cam:"environment",mic:"0",autodl:"0",shock:"1",sens:"2.5",stamp:"1",autodim:"0"},JSON.parse(localStorage.cfg||"{}"));
+let buf,clips,stream,cur,timer,segs=[],events=[],wl,rs,cv,cx,drawT,gw;
 const bps=()=>cfg.q==="1080"?8e6:4e6;
 const mime=()=>["video/mp4;codecs=avc1","video/mp4","video/webm;codecs=vp9","video/webm"].find(t=>MediaRecorder.isTypeSupported(t));
 const fmt=s=>Math.floor(s/60)+":"+String(Math.floor(s%60)).padStart(2,"0");
@@ -49,7 +56,7 @@ async function init(){
 }
 function startSeg(){
   const m=mime(),ext=m.includes("mp4")?"mp4":"webm",t=Date.now(),name=t+"."+ext,ch=[];
-  const r=new MediaRecorder(stream,{mimeType:m,videoBitsPerSecond:bps()});
+  const r=new MediaRecorder(rs,{mimeType:m,videoBitsPerSecond:bps()});
   r.ondataavailable=e=>e.data.size&&ch.push(e.data);
   r.onstop=async()=>{try{await put(buf,name,new Blob(ch,{type:m}));segs.push({t,name});await prune()}catch(e){$("#st").textContent="Erreur disque : "+e.message}};
   r.start(1000);return r;
@@ -66,25 +73,34 @@ async function start(){
     const h=cfg.q==="1080"?1080:720;
     stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:cfg.cam,width:{ideal:h*16/9},height:{ideal:h},frameRate:{ideal:30}},audio:cfg.mic==="1"});
   }catch(e){$("#st").textContent="Caméra refusée : "+e.message;return}
-  $("#pv").srcObject=stream;cur=startSeg();
+  $("#pv").srcObject=stream;
+  await new Promise(r=>{const v=$("#pv");if(v.videoWidth)return r();v.onloadedmetadata=()=>r();setTimeout(r,3000)});
+  rs=stream;
+  if(cfg.stamp==="1"){
+    cv=cv||document.createElement("canvas");cv.width=$("#pv").videoWidth||1280;cv.height=$("#pv").videoHeight||720;cx=cv.getContext("2d");
+    rs=cv.captureStream(30);stream.getAudioTracks().forEach(t=>rs.addTrack(t));drawT=setInterval(draw,33);
+    if(navigator.geolocation)gw=navigator.geolocation.watchPosition(p=>{gps.sp=p.coords.speed==null?null:p.coords.speed*3.6;gps.la=p.coords.latitude;gps.lo=p.coords.longitude},()=>{},{enableHighAccuracy:true});
+  }
+  cur=startSeg();
+  if(cfg.autodim==="1")setTimeout(()=>stream&&stream.active&&$("#dim").classList.add("show"),10000);
   timer=setInterval(()=>{const o=cur;cur=startSeg();setTimeout(()=>o.state!=="inactive"&&o.stop(),400)},SEG);
   try{wl=await navigator.wakeLock.request("screen")}catch(e){}
   $("#go").textContent="Arrêter";$("#go").classList.add("on");$("#save").disabled=false;
 }
 function stop(){
-  clearInterval(timer);cur&&cur.state!=="inactive"&&cur.stop();
+  clearInterval(timer);clearInterval(drawT);gw!=null&&navigator.geolocation.clearWatch(gw);gw=null;rs=null;$("#dim").classList.remove("show");cur&&cur.state!=="inactive"&&cur.stop();
   stream&&stream.getTracks().forEach(t=>t.stop());$("#pv").srcObject=null;wl&&wl.release();
   $("#go").textContent="Démarrer";$("#go").classList.remove("on");$("#save").disabled=true;
 }
-function press(){
+function press(auto){
   navigator.vibrate&&navigator.vibrate(200);const now=Date.now();
   let ev=events[0];
-  if(ev){ev.to=now+cfg.post*60000}else{ev={from:now-cfg.pre*60000,to:now+cfg.post*60000,t0:now};events.push(ev)}
+  if(ev){ev.to=now+cfg.post*60000;if(auto)ev.auto=true}else{ev={from:now-cfg.pre*60000,to:now+cfg.post*60000,t0:now,auto:!!auto};events.push(ev)}
   clearTimeout(ev.tm);ev.tm=setTimeout(()=>finish(ev),ev.to-now+SEG+1500);
 }
 async function finish(ev){
   const sel=segs.filter(s=>s.t+SEG>=ev.from&&s.t<=ev.to);
-  const d=new Date(ev.t0),id=d.toISOString().slice(0,19).replace(/[:T]/g,"-");
+  const d=new Date(ev.t0),id=d.toISOString().slice(0,19).replace(/[:T]/g,"-")+(ev.auto?"-choc":"");
   const dir=await clips.getDirectoryHandle(id,{create:true});let i=0;
   for(const s of sel){try{const f=await(await buf.getFileHandle(s.name)).getFile();await put(dir,String(++i).padStart(3,"0")+"."+s.name.split(".")[1],f)}catch(e){}}
   events=events.filter(e=>e!==ev);await prune();$("#st").textContent="Clip sauvegardé";if(cfg.autodl==="1"&&i)try{await dl(id)}catch(e){}
@@ -93,7 +109,7 @@ function tick(){
   const ev=events[0];
   $("#st").textContent=cur?(ev?"● SAUVEGARDE dans "+fmt(Math.max(0,(ev.to-Date.now())/1000)):"● REC (tampon)"):"Arrêté";
   $("#info").textContent=segs.length?"Tampon "+fmt(segs.length*SEG/1000)+" / "+cfg.buf+" min":"";
-  setTimeout(tick,1000);
+  const dt=$("#dtx");dt&&(dt.textContent=$("#st").textContent+" — double appui : sauver · appui long : réveil");setTimeout(tick,1000);
 }
 async function listClips(){
   const L=$("#list");L.innerHTML="";const names=[];
@@ -134,12 +150,33 @@ async function est(){
 }
 function openCfg(){for(const k in cfg)$("#"+k).value=cfg[k];est();$("#cfg").classList.add("show")}
 $("#cfgb").onclick=openCfg;["buf","q"].forEach(k=>$("#"+k).oninput=est);
-$("#ok").onclick=()=>{for(const k in cfg)cfg[k]=$("#"+k).value;["buf","pre","post"].forEach(k=>cfg[k]=Math.max(k==="buf"?3:0,+cfg[k]));localStorage.cfg=JSON.stringify(cfg);$("#cfg").classList.remove("show");if(cur&&confirm("Redémarrer l’enregistrement pour appliquer ?")){stop();start()}};
+$("#ok").onclick=()=>{for(const k in cfg)cfg[k]=$("#"+k).value;["buf","pre","post"].forEach(k=>cfg[k]=Math.max(k==="buf"?3:0,+cfg[k]));localStorage.cfg=JSON.stringify(cfg);lab();$("#cfg").classList.remove("show");if(cur&&confirm("Redémarrer l’enregistrement pour appliquer ?")){stop();start()}};
 $("#go").onclick=()=>stream&&stream.active?stop():start();
-$("#save").onclick=press;
+$("#save").onclick=()=>press();
 $("#clb").onclick=()=>{listClips();$("#clp").classList.add("show")};
 $("#clx").onclick=()=>{$("#pl").pause();$("#clp").classList.remove("show")};
 document.addEventListener("visibilitychange",async()=>{if(!document.hidden&&stream&&stream.active)try{wl=await navigator.wakeLock.request("screen")}catch(e){}});
 if("serviceWorker"in navigator)navigator.serviceWorker.register("sw.js");
-init();
+const gps={sp:null,la:null,lo:null};let lastShock=0,lt=0,lp;
+function draw(){
+  cx.drawImage($("#pv"),0,0,cv.width,cv.height);
+  const h=cv.height,fs=Math.round(h/32);cx.font=fs+"px sans-serif";
+  const t=new Date().toLocaleString("fr-FR")+(gps.sp!=null?"  "+Math.round(gps.sp)+" km/h":"")+(gps.la!=null?"  "+gps.la.toFixed(5)+", "+gps.lo.toFixed(5):"");
+  cx.fillStyle="#0009";cx.fillRect(0,h-fs*1.6,cv.width,fs*1.6);cx.fillStyle="#fff";cx.fillText(t,fs*0.5,h-fs*0.45);
+}
+addEventListener("devicemotion",e=>{
+  if(cfg.shock!=="1"||!stream||!stream.active)return;
+  const a=e.accelerationIncludingGravity;if(!a)return;
+  const g=Math.abs(Math.hypot(a.x||0,a.y||0,a.z||0)-9.81)/9.81;
+  if(g>+cfg.sens&&Date.now()-lastShock>30000){lastShock=Date.now();press(true)}
+});
+const dbl=()=>{const n=Date.now();if(n-lt<450){lt=0;stream&&stream.active&&press()}else lt=n};
+$("#pv").addEventListener("pointerup",dbl);
+const D=$("#dim");
+D.addEventListener("pointerdown",()=>{lp=setTimeout(()=>{lp=null;lt=0;D.classList.remove("show")},700)});
+D.addEventListener("pointerup",()=>{if(lp){clearTimeout(lp);lp=null;dbl()}});
+D.addEventListener("pointercancel",()=>{clearTimeout(lp);lp=null});
+$("#dimb").onclick=()=>D.classList.add("show");
+function lab(){$("#save").textContent="SAUVER "+cfg.pre+"’ + "+cfg.post+"’"}
+lab();init();
 </script></body></html>
