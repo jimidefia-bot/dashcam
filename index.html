@@ -27,13 +27,14 @@ input,select{width:100%;padding:12px;border-radius:8px;border:1px solid #444;bac
 <label>Qualité</label><select id="q"><option value="720">720p – 4 Mb/s</option><option value="1080">1080p – 8 Mb/s</option></select>
 <label>Caméra</label><select id="cam"><option value="environment">Arrière</option><option value="user">Avant</option></select>
 <label>Micro</label><select id="mic"><option value="0">Non</option><option value="1">Oui</option></select>
+<label>Télécharger automatiquement le ZIP après chaque sauvegarde</label><select id="autodl"><option value="0">Non</option><option value="1">Oui</option></select>
 <p id="est"></p><button id="ok">Enregistrer les réglages</button></div>
 
 <div class="pan" id="clp"><h2>Clips sauvegardés</h2><video id="pl" controls playsinline></video><div id="list"></div><button id="clx" style="margin-top:14px">Fermer</button></div>
 
 <script>
 const $=s=>document.querySelector(s), SEG=10000;
-const cfg=Object.assign({buf:10,pre:2,post:3,q:"720",cam:"environment",mic:"0"},JSON.parse(localStorage.cfg||"{}"));
+const cfg=Object.assign({buf:10,pre:2,post:3,q:"720",cam:"environment",mic:"0",autodl:"0"},JSON.parse(localStorage.cfg||"{}"));
 let buf,clips,stream,cur,timer,segs=[],events=[],wl;
 const bps=()=>cfg.q==="1080"?8e6:4e6;
 const mime=()=>["video/mp4;codecs=avc1","video/mp4","video/webm;codecs=vp9","video/webm"].find(t=>MediaRecorder.isTypeSupported(t));
@@ -86,7 +87,7 @@ async function finish(ev){
   const d=new Date(ev.t0),id=d.toISOString().slice(0,19).replace(/[:T]/g,"-");
   const dir=await clips.getDirectoryHandle(id,{create:true});let i=0;
   for(const s of sel){try{const f=await(await buf.getFileHandle(s.name)).getFile();await put(dir,String(++i).padStart(3,"0")+"."+s.name.split(".")[1],f)}catch(e){}}
-  events=events.filter(e=>e!==ev);await prune();$("#st").textContent="Clip sauvegardé";
+  events=events.filter(e=>e!==ev);await prune();$("#st").textContent="Clip sauvegardé";if(cfg.autodl==="1"&&i)try{await dl(id)}catch(e){}
 }
 function tick(){
   const ev=events[0];
