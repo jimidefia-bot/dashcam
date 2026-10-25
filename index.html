@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<link rel="manifest" href="manifest.json"><meta name="theme-color" content="#000000"><title>Dashcam</title>
+<style>
+*{box-sizing:border-box}html,body{height:100%;margin:0;background:#000;color:#fff;font:16px system-ui,sans-serif}
+video#pv{position:fixed;inset:0;width:100%;height:100%;object-fit:cover}
+.bar{position:fixed;left:0;right:0;padding:env(safe-area-inset-top,0px) 12px 8px;top:0;background:#0009;display:flex;justify-content:space-between;gap:8px;font-size:14px}
+.bot{position:fixed;left:0;right:0;bottom:0;padding:12px 12px calc(14px + env(safe-area-inset-bottom,0px));background:#0009;display:flex;gap:10px;align-items:center}
+button{border:0;border-radius:12px;padding:14px 16px;font-size:16px;background:#333;color:#fff}
+#save{flex:1;background:#d00;font-weight:700;font-size:20px;padding:20px}#save:disabled{background:#522}
+#go.on{background:#060}
+.pan{position:fixed;inset:0;background:#111;overflow:auto;padding:calc(12px + env(safe-area-inset-top,0px)) 14px 30px;display:none}
+.pan.show{display:block}label{display:block;margin:12px 0 4px;color:#bbb;font-size:14px}
+input,select{width:100%;padding:12px;border-radius:8px;border:1px solid #444;background:#222;color:#fff;font-size:16px}
+.clip{background:#222;border-radius:10px;padding:10px;margin:10px 0}.clip div{display:flex;gap:8px;margin-top:8px}
+#pl{width:100%;max-height:50vh;background:#000}small{color:#999}
+</style></head><body>
+<video id="pv" autoplay muted playsinline></video>
+<div class="bar"><span id="st">Arrêté</span><span id="info"></span></div>
+<div class="bot"><button id="cfgb">⚙</button><button id="go">Démarrer</button><button id="save" disabled>SAUVER 2’ + 3’</button><button id="clb">Clips</button></div>
+
+<div class="pan" id="cfg"><h2>Réglages</h2>
+<label>Taille du tampon (minutes de vidéo conservées)</label><input id="buf" type="number" min="3" max="240">
+<label>Minutes avant l’appui</label><input id="pre" type="number" min="0" max="30">
+<label>Minutes après l’appui</label><input id="post" type="number" min="0" max="30">
+<label>Qualité</label><select id="q"><option value="720">720p – 4 Mb/s</option><option value="1080">1080p – 8 Mb/s</option></select>
+<label>Caméra</label><select id="cam"><option value="environment">Arrière</option><option value="user">Avant</option></select>
+<label>Micro</label><select id="mic"><option value="0">Non</option><option value="1">Oui</option></select>
+<p id="est"></p><button id="ok">Enregistrer les réglages</button></div>
+
+<div class="pan" id="clp"><h2>Clips sauvegardés</h2><video id="pl" controls playsinline></video><div id="list"></div><button id="clx" style="margin-top:14px">Fermer</button></div>
+
+<script>
+const $=s=>document.querySelector(s), SEG=10000;
+const cfg=Object.assign({buf:10,pre:2,post:3,q:"720",cam:"environment",mic:"0"},JSON.parse(localStorage.cfg||"{}"));
+let buf,clips,stream,cur,timer,segs=[],events=[],wl;
+const bps=()=>cfg.q==="1080"?8e6:4e6;
+const mime=()=>["video/mp4;codecs=avc1","video/mp4","video/webm;codecs=vp9","video/webm"].find(t=>MediaRecorder.isTypeSupported(t));
+const fmt=s=>Math.floor(s/60)+":"+String(Math.floor(s%60)).padStart(2,"0");
+async function put(dir,name,blob){const f=await dir.getFileHandle(name,{create:true}),w=await f.createWritable();await w.write(blob);await w.close()}
+async function init(){
+  const root=await navigator.storage.getDirectory();
+  buf=await root.getDirectoryHandle("buffer",{create:true});clips=await root.getDirectoryHandle("clips",{create:true});
+  navigator.storage.persist&&navigator.storage.persist();
+  for await(const [n] of buf.entries()){const t=parseInt(n);if(t)segs.push({t,name:n})}
+  segs.sort((a,b)=>a.t-b.t);tick();
+}
+function startSeg(){
+  const m=mime(),ext=m.includes("mp4")?"mp4":"webm",t=Date.now(),name=t+"."+ext,ch=[];
+  const r=new MediaRecorder(stream,{mimeType:m,videoBitsPerSecond:bps()});
+  r.ondataavailable=e=>e.data.size&&ch.push(e.data);
+  r.onstop=async()=>{try{await put(buf,name,new Blob(ch,{type:m}));segs.push({t,name});await prune()}catch(e){$("#st").textContent="Erreur disque : "+e.message}};
+  r.start(1000);return r;
+}
+async function prune(){
+  const max=Math.ceil(cfg.buf*60000/SEG), keepFrom=Math.min(...events.map(e=>e.from),Infinity);
+  while(segs.length>max){
+    const i=segs.findIndex(s=>s.t+SEG>=keepFrom?false:true);
+    if(i<0)break;const [s]=segs.splice(i,1);try{await buf.removeEntry(s.name)}catch(e){}
+  }
+}
+async function start(){
+  try{
+    const h=cfg.q==="1080"?1080:720;
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:cfg.cam,width:{ideal:h*16/9},height:{ideal:h},frameRate:{ideal:30}},audio:cfg.mic==="1"});
+  }catch(e){$("#st").textContent="Caméra refusée : "+e.message;return}
+  $("#pv").srcObject=stream;cur=startSeg();
+  timer=setInterval(()=>{const o=cur;cur=startSeg();setTimeout(()=>o.state!=="inactive"&&o.stop(),400)},SEG);
+  try{wl=await navigator.wakeLock.request("screen")}catch(e){}
+  $("#go").textContent="Arrêter";$("#go").classList.add("on");$("#save").disabled=false;
+}
+function stop(){
+  clearInterval(timer);cur&&cur.state!=="inactive"&&cur.stop();
+  stream&&stream.getTracks().forEach(t=>t.stop());$("#pv").srcObject=null;wl&&wl.release();
+  $("#go").textContent="Démarrer";$("#go").classList.remove("on");$("#save").disabled=true;
+}
+function press(){
+  navigator.vibrate&&navigator.vibrate(200);const now=Date.now();
+  let ev=events[0];
+  if(ev){ev.to=now+cfg.post*60000}else{ev={from:now-cfg.pre*60000,to:now+cfg.post*60000,t0:now};events.push(ev)}
+  clearTimeout(ev.tm);ev.tm=setTimeout(()=>finish(ev),ev.to-now+SEG+1500);
+}
+async function finish(ev){
+  const sel=segs.filter(s=>s.t+SEG>=ev.from&&s.t<=ev.to);
+  const d=new Date(ev.t0),id=d.toISOString().slice(0,19).replace(/[:T]/g,"-");
+  const dir=await clips.getDirectoryHandle(id,{create:true});let i=0;
+  for(const s of sel){try{const f=await(await buf.getFileHandle(s.name)).getFile();await put(dir,String(++i).padStart(3,"0")+"."+s.name.split(".")[1],f)}catch(e){}}
+  events=events.filter(e=>e!==ev);await prune();$("#st").textContent="Clip sauvegardé";
+}
+function tick(){
+  const ev=events[0];
+  $("#st").textContent=cur?(ev?"● SAUVEGARDE dans "+fmt(Math.max(0,(ev.to-Date.now())/1000)):"● REC (tampon)"):"Arrêté";
+  $("#info").textContent=segs.length?"Tampon "+fmt(segs.length*SEG/1000)+" / "+cfg.buf+" min":"";
+  setTimeout(tick,1000);
+}
+async function listClips(){
+  const L=$("#list");L.innerHTML="";const names=[];
+  for await(const [n] of clips.entries())names.push(n);names.sort().reverse();
+  if(!names.length)L.innerHTML="<p><small>Aucun clip.</small></p>";
+  for(const n of names){
+    const c=document.createElement("div");c.className="clip";c.innerHTML="<b>"+n+"</b><div><button>Lire</button><button>ZIP</button><button>Suppr.</button></div>";
+    const [b1,b2,b3]=c.querySelectorAll("button");
+    b1.onclick=()=>play(n);b2.onclick=()=>dl(n);b3.onclick=async()=>{if(confirm("Supprimer ce clip ?")){await clips.removeEntry(n,{recursive:true});listClips()}};
+    L.appendChild(c);
+  }
+}
+async function files(n){const d=await clips.getDirectoryHandle(n),a=[];for await(const [fn,h] of d.entries())a.push({name:fn,file:await h.getFile()});return a.sort((x,y)=>x.name.localeCompare(y.name))}
+async function play(n){
+  const a=await files(n),v=$("#pl");let i=0;
+  const go=()=>{if(i<a.length){v.src=URL.createObjectURL(a[i++].file);v.play()}};
+  v.onended=go;go();
+}
+const T=new Uint32Array(256).map((_,n)=>{let c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;return c>>>0});
+async function dl(n){
+  const fl=await files(n),parts=[],cd=[],te=new TextEncoder();let off=0;
+  for(const f of fl){
+    let c=0xFFFFFFFF;const rd=f.file.stream().getReader();
+    for(;;){const{done,value}=await rd.read();if(done)break;for(let i=0;i<value.length;i++)c=T[(c^value[i])&255]^(c>>>8)}
+    c=(c^0xFFFFFFFF)>>>0;const nm=te.encode(f.name),sz=f.file.size;
+    const h=new DataView(new ArrayBuffer(30));h.setUint32(0,0x04034b50,true);h.setUint16(4,20,true);h.setUint32(14,c,true);h.setUint32(18,sz,true);h.setUint32(22,sz,true);h.setUint16(26,nm.length,true);
+    const d=new DataView(new ArrayBuffer(46));d.setUint32(0,0x02014b50,true);d.setUint16(4,20,true);d.setUint16(6,20,true);d.setUint32(16,c,true);d.setUint32(20,sz,true);d.setUint32(24,sz,true);d.setUint16(28,nm.length,true);d.setUint32(42,off,true);
+    parts.push(h,nm,f.file);cd.push(d,nm);off+=30+nm.length+sz;
+  }
+  const cs=cd.reduce((s,x)=>s+(x.byteLength??x.length),0),e=new DataView(new ArrayBuffer(22));
+  e.setUint32(0,0x06054b50,true);e.setUint16(8,fl.length,true);e.setUint16(10,fl.length,true);e.setUint32(12,cs,true);e.setUint32(16,off,true);
+  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([...parts,...cd,e],{type:"application/zip"}));a.download="dashcam-"+n+".zip";a.click();
+}
+async function est(){
+  const b=bps()*($("#buf").value||0)*60/8e6;let free="";
+  try{const s=await navigator.storage.estimate();free=" Espace libre : "+Math.round((s.quota-s.usage)/1e9)+" Go."}catch(e){}
+  $("#est").textContent="Tampon ≈ "+Math.round(b)+" Mo."+free;
+}
+function openCfg(){for(const k in cfg)$("#"+k).value=cfg[k];est();$("#cfg").classList.add("show")}
+$("#cfgb").onclick=openCfg;["buf","q"].forEach(k=>$("#"+k).oninput=est);
+$("#ok").onclick=()=>{for(const k in cfg)cfg[k]=$("#"+k).value;["buf","pre","post"].forEach(k=>cfg[k]=Math.max(k==="buf"?3:0,+cfg[k]));localStorage.cfg=JSON.stringify(cfg);$("#cfg").classList.remove("show");if(cur&&confirm("Redémarrer l’enregistrement pour appliquer ?")){stop();start()}};
+$("#go").onclick=()=>stream&&stream.active?stop():start();
+$("#save").onclick=press;
+$("#clb").onclick=()=>{listClips();$("#clp").classList.add("show")};
+$("#clx").onclick=()=>{$("#pl").pause();$("#clp").classList.remove("show")};
+document.addEventListener("visibilitychange",async()=>{if(!document.hidden&&stream&&stream.active)try{wl=await navigator.wakeLock.request("screen")}catch(e){}});
+if("serviceWorker"in navigator)navigator.serviceWorker.register("sw.js");
+init();
+</script></body></html>
